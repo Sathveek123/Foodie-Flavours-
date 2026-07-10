@@ -1199,7 +1199,7 @@ export default function DashboardPage() {
     setTimeout(() => setReferralCopied(false), 2000);
   };
 
-  const handleSimulatePhotoUpload = () => {
+  const handleSimulateReviewPhotoUpload = () => {
     setIsUploadingPhoto(true);
     setTimeout(() => {
       setSimulatedReviewImage("/images/truffle_dish.png");
@@ -5223,7 +5223,7 @@ export default function DashboardPage() {
                     </div>
                   ) : (
                     <button
-                      onClick={handleSimulatePhotoUpload}
+                      onClick={handleSimulateReviewPhotoUpload}
                       disabled={isUploadingPhoto}
                       className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-xs font-bold transition cursor-pointer"
                     >
