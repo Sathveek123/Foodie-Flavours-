@@ -1,4 +1,5 @@
 {
+  "name": "foodie-flavours",
   "buildCommand": "cd flavora-kitchen && npm install && npm run build",
   "outputDirectory": "flavora-kitchen/dist",
   "installCommand": "cd flavora-kitchen && npm install",
