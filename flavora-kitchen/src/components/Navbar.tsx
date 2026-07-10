@@ -1,10 +1,9 @@
 import { motion } from "motion/react";
-import { ShoppingCart, Menu, Volume2, VolumeX } from "lucide-react";
+import { ShoppingCart, Menu } from "lucide-react";
 import { useEffect, useState, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useLenis } from "lenis/react";
 import { useCart } from "../context/CartContext";
-import { getMuteState, setMuteState } from "../lib/sounds";
 
 export function Navbar({ 
   onOpenCart, 
@@ -19,7 +18,6 @@ export function Navbar({
   const navigate = useNavigate();
   const lenis = useLenis();
   const [scrolled, setScrolled] = useState(false);
-  const [muted, setMuted] = useState(getMuteState());
   const { cartCount } = useCart();
 
   useEffect(() => {
@@ -45,12 +43,6 @@ export function Navbar({
         }
       }
     }
-  };
-
-  const toggleMute = () => {
-    const newState = !muted;
-    setMuted(newState);
-    setMuteState(newState);
   };
 
   return (
@@ -123,17 +115,6 @@ export function Navbar({
             }`}
           >
             Book Table
-          </motion.button>
-
-          {/* Sound Control Toggle */}
-          <motion.button
-            whileHover={{ scale: 1.1 }}
-            whileTap={{ scale: 0.9 }}
-            onClick={toggleMute}
-            className="p-2.5 rounded-full transition-colors bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/15 cursor-pointer text-white"
-            title={muted ? "Unmute sounds" : "Mute sounds"}
-          >
-            {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5 animate-pulse" />}
           </motion.button>
 
           {/* Cart Icon Button with badge */}

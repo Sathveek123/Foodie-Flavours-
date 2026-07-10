@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { motion, useMotionValue, useSpring, useTransform } from "motion/react";
 import { useLenis } from "lenis/react";
-import { playTickSound } from "../lib/sounds";
 
 function TypographicClock() {
   const [timeLeft, setTimeLeft] = useState(3600 * 2 + 45 * 60);
@@ -10,7 +9,6 @@ function TypographicClock() {
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev > 0) {
-          playTickSound();
           return prev - 1;
         }
         return 0;
