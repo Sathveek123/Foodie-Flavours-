@@ -1,0 +1,88 @@
+@import url('https://fonts.googleapis.com/css2?family=Dancing+Script:wght@700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400..900;1,400..900&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --font-cursive: "Dancing Script", cursive;
+  --font-serif: "Playfair Display", Georgia, serif;
+  --color-warm-ink: #1a1410;
+  --color-cream: #faf6f0;
+}
+
+@layer base {
+  html {
+    /* Remove native smooth — Lenis handles all scrolling */
+    scroll-behavior: auto;
+    /* Prevent content jumping on scrollbar appear/disappear */
+    scrollbar-gutter: stable;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeSpeed;
+  }
+
+  body {
+    /* Prevent touch scroll bounce causing layout jank */
+    overscroll-behavior-y: none;
+  }
+
+  /* Pause everything for users who prefer reduced motion */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .preserve-3d {
+    transform-style: preserve-3d;
+  }
+  .backface-hidden {
+    backface-visibility: hidden;
+  }
+  .perspective-1000 {
+    perspective: 1000px;
+  }
+  .clip-triangle-left {
+    clip-path: polygon(0 0, 100% 0, 100% 100%);
+  }
+  .clip-triangle-right {
+    clip-path: polygon(0 0, 100% 0, 0 100%);
+  }
+
+  /* Global Premium Editorial Dark Gradients */
+  .bg-dark-radial-center {
+    background: radial-gradient(circle at 50% 50%, #2a1f17 0%, #0d0a08 100%);
+  }
+  .bg-dark-radial-right {
+    background: radial-gradient(circle at 75% 50%, #2c1e14 0%, #0d0a08 100%);
+  }
+  .bg-dark-radial-left {
+    background: radial-gradient(circle at 25% 50%, #2c1e14 0%, #0d0a08 100%);
+  }
+
+  /* Zero-Weight SVG Noise/Grain Overlay — GPU composited own layer */
+  .noise-overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+    opacity: 0.035;
+    pointer-events: none;
+    z-index: 1;
+    /* GPU compositing — avoids triggering repaints */
+    will-change: opacity;
+    transform: translateZ(0);
+  }
+}

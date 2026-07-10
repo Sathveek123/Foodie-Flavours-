@@ -1,0 +1,6 @@
+{
+  "name": "Flavora Kitchen",
+  "description": "A fully immersive 3D web experience for Flavora Kitchen food ordering using WebGL and advanced CSS animations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
