@@ -19,11 +19,28 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeSpeed;
+    /* Improve mobile performance */
+    touch-action: manipulation;
   }
 
   body {
     /* Prevent touch scroll bounce causing layout jank */
     overscroll-behavior-y: none;
+    /* Better mobile performance */
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Optimize images for mobile */
+  img {
+    max-width: 100%;
+    height: auto;
+    content-visibility: auto;
+  }
+
+  /* Better mobile text rendering */
+  * {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   /* Pause everything for users who prefer reduced motion */

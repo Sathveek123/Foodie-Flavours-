@@ -144,7 +144,7 @@ export function Hero({ onOrderClick, onReserveClick }: { onOrderClick?: () => vo
   const prevIndexRef = useRef(activeIndex);
 
   useEffect(() => {
-    const checkMobile = () => setIsMobile(window.innerWidth < 768);
+    const checkMobile = () => setIsMobile(window.innerWidth < 1024);
     checkMobile();
 
     // Debounced resize — fires at most once per 200ms
