@@ -664,31 +664,7 @@ export default function DashboardPage() {
   };
 
   // Order history ledger
-  const [orderHistory, setOrderHistory] = useState<Order[]>(() => {
-    try {
-      const stored = localStorage.getItem("flavora_order_history");
-      return stored ? JSON.parse(stored) : [
-        {
-          id: "FL-8742",
-          date: "2026-06-20",
-          items: [
-            { id: "101", name: "Crunchy Spring Rolls", price: 280, quantity: 2, image: "/images/springroll1.png" },
-            { id: "203", name: "Creamy Alfredo Pasta", price: 520, quantity: 1, image: "/images/pasta1.png" }
-          ],
-          subtotal: 1080,
-          fees: { gst: 54, delivery: 40, platform: 10, tip: 20 },
-          total: 1204,
-          status: "Delivered",
-          address: { id: "A1", type: "Home", addressLine: "Royal Heights Court, Block 3, Nallasopara West" },
-          paymentMethod: "UPI",
-          reviewSubmitted: true,
-          review: { rating: 5, comment: "Exceptional spring rolls, very creamy pasta!", riderRating: 5 }
-        }
-      ];
-    } catch {
-      return [];
-    }
-  });
+  const [orderHistory, setOrderHistory] = useState<Order[]>([]);
 
   // Review Modal state
   const [reviewOrderTarget, setReviewOrderTarget] = useState<Order | null>(null);
@@ -729,34 +705,92 @@ export default function DashboardPage() {
   // -------------------------------------------------------------
   // 🍽️ TABLE BOOKING STATE VARIABLES
   // -------------------------------------------------------------
-  const [savedBookings, setSavedBookings] = useState<Booking[]>(() => {
-    try {
-      const stored = localStorage.getItem("flavora_bookings");
-      return stored ? JSON.parse(stored) : [
-        {
-          id: "FL-BOOK-89104",
-          date: "2026-06-20",
-          time: "20:00",
-          guests: 4,
+  const [savedBookings, setSavedBookings] = useState<Booking[]>([]);
+
+  // Fetch user's own orders + reservations from Supabase on login
+  useEffect(() => {
+    if (!user) return;
+
+    const fetchUserData = async () => {
+      // 1. Fetch this user's orders
+      const { data: ordersData } = await supabase
+        .from("orders")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
+
+      if (ordersData) {
+        setOrderHistory(ordersData.map((o: any) => ({
+          id: o.id,
+          date: o.created_at ? o.created_at.split("T")[0] : "",
+          items: o.items || [],
+          subtotal: parseFloat(o.subtotal),
+          fees: o.fees || { gst: 0, delivery: 0, platform: 0, tip: 0 },
+          total: parseFloat(o.total),
+          status: o.order_status === "pending" ? "Order Placed" :
+                  o.order_status === "accepted" ? "Accepted" :
+                  o.order_status === "preparing" ? "Preparing" :
+                  o.order_status === "packed" ? "Packed" :
+                  o.order_status === "out_for_delivery" ? "Out For Delivery" :
+                  o.order_status === "delivered" ? "Delivered" : "Order Placed",
+          address: { id: "A1", type: "Other" as const, addressLine: o.delivery_address || "" },
+          paymentMethod: o.payment_method || "UPI",
+        })));
+      }
+
+      // 2. Fetch this user's reservations
+      const { data: resData } = await supabase
+        .from("reservations")
+        .select("*, restaurant_tables(table_number)")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
+
+      if (resData) {
+        setSavedBookings(resData.map((b: any) => ({
+          id: b.id,
+          date: b.reservation_date,
+          time: b.reservation_time,
+          guests: b.guest_count,
           duration: "2h",
-          tableType: "Family Table",
-          tableId: "F1",
-          event: "Anniversary Celebration",
-          diningPackage: "Romantic Package",
-          requests: ["Window table", "Anniversary setup"],
-          status: "Completed",
+          tableType: b.dining_package || "Standard Seating",
+          tableId: b.restaurant_tables ? `Table ${b.restaurant_tables.table_number}` : "Not Assigned Yet",
+          event: b.occasion || "Standard Dining",
+          diningPackage: b.dining_package || "Standard Seating",
+          requests: b.special_requests ? b.special_requests.split(", ") : [],
+          status: b.status === "confirmed" ? "Confirmed" :
+                  b.status === "pending" ? "Confirmed" :
+                  b.status === "completed" ? "Completed" : "Cancelled",
           emailNotification: true,
           smsNotification: true,
-          reminders: { alert24h: true, alert2h: true, alertNav: true },
-          waitlisted: false,
-          feedbackSubmitted: true,
-          feedback: { food: 5, ambience: 5, service: 5, comment: "Splendid decoration and excellent hospitality." }
-        }
-      ];
-    } catch {
-      return [];
-    }
-  });
+          reminders: { alert24h: false, alert2h: false, alertNav: false },
+          waitlisted: b.table_id === null && b.status === "pending",
+        })));
+      }
+    };
+
+    fetchUserData();
+
+    // Subscribe to live order status changes for this user
+    const orderChannel = supabase
+      .channel(`user-orders-${user.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "orders", filter: `user_id=eq.${user.id}` }, () => {
+        fetchUserData();
+      })
+      .subscribe();
+
+    // Subscribe to live reservation changes for this user
+    const resChannel = supabase
+      .channel(`user-reservations-${user.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "reservations", filter: `user_id=eq.${user.id}` }, () => {
+        fetchUserData();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(orderChannel);
+      supabase.removeChannel(resChannel);
+    };
+  }, [user]);
 
   // Table Wizard configurations
   const [bookingDate, setBookingDate] = useState("2026-06-25");
