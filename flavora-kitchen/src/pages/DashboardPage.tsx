@@ -491,6 +491,37 @@ export default function DashboardPage() {
 
   const ALLERGEN_OPTIONS = ["Gluten", "Dairy", "Nuts", "Shellfish", "Eggs", "Soy", "Sesame", "Fish"];
 
+  // Load and reactively sync menu dish stock overrides from localStorage (set by admin)
+  const [dishStockOverrides, setDishStockOverrides] = useState<Record<number, StockStatus>>(() => {
+    try {
+      const stored = localStorage.getItem("flavora_dish_stock_overrides");
+      return stored ? JSON.parse(stored) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  useEffect(() => {
+    const handleStorage = () => {
+      try {
+        const stored = localStorage.getItem("flavora_dish_stock_overrides");
+        if (stored) {
+          setDishStockOverrides(JSON.parse(stored));
+        } else {
+          setDishStockOverrides({});
+        }
+      } catch (e) {
+        console.warn("Failed to sync storage stock:", e);
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    const interval = setInterval(handleStorage, 1500); // Polling backup for single-window tab shifts
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      clearInterval(interval);
+    };
+  }, []);
+
   // ── TIER 2: Delivery Zone Validation ────────────────────────────────────
   // Delivery fee is now computed from Haversine distance (see fee calc below)
   // The selected address drives the zone check reactively
@@ -2260,7 +2291,7 @@ export default function DashboardPage() {
                             src={dish.image} 
                             loading="lazy"
                             decoding="async"
-                            className={`w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 ${DISH_STOCK[dish.id] === 'sold_out' ? 'opacity-40 grayscale' : ''}`}
+                            className={`w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 ${(dishStockOverrides[dish.id] || DISH_STOCK[dish.id] || "available") === 'sold_out' ? 'opacity-40 grayscale' : ''}`}
                             alt={dish.name}
                             onError={(e) => {
                               (e.target as HTMLImageElement).src = "/images/truffle_dish.png";
@@ -2286,14 +2317,14 @@ export default function DashboardPage() {
                           </div>
 
                           {/* Stock status badge (Tier 2: Inventory) */}
-                          {DISH_STOCK[dish.id] === "sold_out" && (
+                          {(dishStockOverrides[dish.id] || DISH_STOCK[dish.id] || "available") === "sold_out" && (
                             <div className="absolute inset-0 flex items-center justify-center bg-black/60 rounded-2xl">
                               <span className="bg-red-600 text-white text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-full flex items-center gap-1.5 shadow-lg">
                                 <Package size={10} /> Sold Out
                               </span>
                             </div>
                           )}
-                          {DISH_STOCK[dish.id] === "low" && (
+                          {(dishStockOverrides[dish.id] || DISH_STOCK[dish.id] || "available") === "low" && (
                             <div className="absolute bottom-10 left-3">
                               <span className="bg-amber-500/90 text-black text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-full flex items-center gap-1 shadow">
                                 <AlertTriangle size={9} /> Low Stock
@@ -2327,7 +2358,7 @@ export default function DashboardPage() {
                           <span className="text-[9px] uppercase font-mono tracking-widest text-cream/30">Mild</span>
                         )}
 
-                        {DISH_STOCK[dish.id] === "sold_out" ? (
+                        {(dishStockOverrides[dish.id] || DISH_STOCK[dish.id] || "available") === "sold_out" ? (
                           <span className="px-4 py-2 border border-red-500/30 bg-red-500/10 text-red-400 rounded-xl text-xs font-bold opacity-60 select-none">
                             Unavailable
                           </span>

@@ -34,12 +34,12 @@ import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import DashboardPage from "./pages/DashboardPage";
 import ResetPasswordPage from "./pages/ResetPasswordPage";
+import AdminPage from "./pages/AdminPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { AuthGateModal } from "./components/AuthGateModal";
 
 import { useAuth } from "./context/AuthContext";
 import { SmoothScroll } from "./components/SmoothScroll";
-import { playDrawerOpenSound } from "./lib/sounds";
 
 // ── Steam wisp keyframes injected once into the document head ──────────────
 const STEAM_STYLE = `
@@ -445,6 +445,7 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/signup" element={<SignupPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
+      <Route path="/admin2006" element={<AdminPage />} />
 
       {/* Protected Routes Dashboard */}
       <Route element={<ProtectedRoute />}>
