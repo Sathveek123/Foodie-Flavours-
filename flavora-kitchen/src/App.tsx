@@ -370,6 +370,8 @@ function LoadingPercentage({ progress }: { progress: number }) {
   );
 }
 
+import { isSupabaseConfigured } from "./lib/supabaseClient";
+
 export default function App() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -438,6 +440,32 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [toastVisible]);
+
+  if (!isSupabaseConfigured) {
+    return (
+      <div className="min-h-screen bg-[#0d0a08] flex flex-col justify-center items-center px-6 relative text-center text-cream select-none font-sans">
+        <div className="noise-overlay" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full opacity-30 pointer-events-none"
+             style={{ background: "radial-gradient(circle, rgba(239, 68, 68, 0.1) 0%, rgba(239,68,68,0) 70%)", filter: "blur(80px)" }} />
+        <div className="max-w-md bg-white/[0.02] border border-red-500/20 rounded-[2rem] p-10 shadow-2xl backdrop-blur-3xl space-y-6 z-10">
+          <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center text-2xl mx-auto shadow-inner text-red-500 animate-pulse">
+            ⚠️
+          </div>
+          <h2 className="text-2xl font-serif font-black text-white tracking-tight">Database Connection Offline</h2>
+          <p className="text-cream/60 text-xs leading-relaxed">
+            Flavora Kitchen has transitioned to a real production-grade database. To use authentication, ordering, and live tables, please configure your Supabase variables:
+          </p>
+          <div className="bg-black/40 border border-white/5 p-4 rounded-xl text-left font-mono text-[10px] text-cream/70 space-y-2">
+            <div>VITE_SUPABASE_URL = <span className="text-red-400">MISSING</span></div>
+            <div>VITE_SUPABASE_ANON_KEY = <span className="text-red-400">MISSING</span></div>
+          </div>
+          <p className="text-[10px] text-cream/35">
+            Configure these parameters inside your <code className="text-orange-500">.env</code> file or Vercel Environment Variables dashboard to link Flavora.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <Routes>

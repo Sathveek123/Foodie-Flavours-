@@ -58,6 +58,7 @@ import {
   BadgeCheck
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
+import { supabase } from "../lib/supabaseClient";
 import { useCart } from "../context/CartContext";
 import { useFavorites } from "../context/FavoritesContext";
 import { VOUCHERS } from "../config/vouchers";
@@ -491,36 +492,56 @@ export default function DashboardPage() {
 
   const ALLERGEN_OPTIONS = ["Gluten", "Dairy", "Nuts", "Shellfish", "Eggs", "Soy", "Sesame", "Fish"];
 
-  // Load and reactively sync menu dish stock overrides from localStorage (set by admin)
-  const [dishStockOverrides, setDishStockOverrides] = useState<Record<number, StockStatus>>(() => {
-    try {
-      const stored = localStorage.getItem("flavora_dish_stock_overrides");
-      return stored ? JSON.parse(stored) : {};
-    } catch {
-      return {};
-    }
-  });
+  // Load and reactively sync menu dish stock overrides from Supabase in real-time
+  const [dbTables, setDbTables] = useState<any[]>([]);
+  const [dbFoodItems, setDbFoodItems] = useState<any[]>([]);
 
   useEffect(() => {
-    const handleStorage = () => {
-      try {
-        const stored = localStorage.getItem("flavora_dish_stock_overrides");
-        if (stored) {
-          setDishStockOverrides(JSON.parse(stored));
-        } else {
-          setDishStockOverrides({});
-        }
-      } catch (e) {
-        console.warn("Failed to sync storage stock:", e);
-      }
+    if (!user) return;
+
+    // 1. Fetch & Subscribe to restaurant_tables
+    const fetchTables = async () => {
+      const { data } = await supabase.from("restaurant_tables").select("*").order("table_number", { ascending: true });
+      if (data) setDbTables(data);
     };
-    window.addEventListener("storage", handleStorage);
-    const interval = setInterval(handleStorage, 1500); // Polling backup for single-window tab shifts
+    fetchTables();
+    const tablesChannel = supabase
+      .channel("public-tables-sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_tables" }, () => {
+        fetchTables();
+      })
+      .subscribe();
+
+    // 2. Fetch & Subscribe to food_items
+    const fetchFoodItems = async () => {
+      const { data } = await supabase.from("food_items").select("*");
+      if (data) setDbFoodItems(data);
+    };
+    fetchFoodItems();
+    const foodChannel = supabase
+      .channel("public-food-sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "food_items" }, () => {
+        fetchFoodItems();
+      })
+      .subscribe();
+
     return () => {
-      window.removeEventListener("storage", handleStorage);
-      clearInterval(interval);
+      supabase.removeChannel(tablesChannel);
+      supabase.removeChannel(foodChannel);
     };
-  }, []);
+  }, [user]);
+
+  // Helper selectors
+  const getDishStockStatus = (dishId: number): StockStatus => {
+    const match = dbFoodItems.find(f => f.id === dishId);
+    if (match) return match.stock_status as StockStatus;
+    return DISH_STOCK[dishId] || "available";
+  };
+
+  const isDishSellingFast = (dishId: number): boolean => {
+    const match = dbFoodItems.find(f => f.id === dishId);
+    return match ? match.is_selling_fast : false;
+  };
 
   // ── TIER 2: Delivery Zone Validation ────────────────────────────────────
   // Delivery fee is now computed from Haversine distance (see fee calc below)
@@ -821,16 +842,24 @@ export default function DashboardPage() {
     "Quiet area"
   ];
 
-  // Dynamic Visual tables layout based on selected type
+  // Dynamic Visual tables layout based on selected type loaded from Supabase
   const getSeatingTablesForType = (type: string): SeatingTable[] => {
-    return [
-      { id: `${type.substring(0, 2)}-01`, name: "Table 01", capacity: 2, isBooked: false },
-      { id: `${type.substring(0, 2)}-02`, name: "Table 02", capacity: 4, isBooked: true },
-      { id: `${type.substring(0, 2)}-03`, name: "Table 03", capacity: 2, isBooked: false },
-      { id: `${type.substring(0, 2)}-04`, name: "Table 04", capacity: 6, isBooked: false },
-      { id: `${type.substring(0, 2)}-05`, name: "Table 05", capacity: 4, isBooked: true },
-      { id: `${type.substring(0, 2)}-06`, name: "Table 06", capacity: 2, isBooked: false }
-    ];
+    if (dbTables.length === 0) {
+      // Fallback seed if database tables aren't fetched yet
+      return [
+        { id: `${type.substring(0, 2)}-01`, name: "Table 01", capacity: 2, isBooked: false },
+        { id: `${type.substring(0, 2)}-02`, name: "Table 02", capacity: 4, isBooked: true },
+        { id: `${type.substring(0, 2)}-03`, name: "Table 03", capacity: 2, isBooked: false },
+        { id: `${type.substring(0, 2)}-04`, name: "Table 04", capacity: 6, isBooked: false },
+        { id: `${type.substring(0, 2)}-05`, name: "Table 05", capacity: 12, isBooked: false }
+      ];
+    }
+    return dbTables.map(t => ({
+      id: t.id,
+      name: `Table ${t.table_number}`,
+      capacity: t.capacity,
+      isBooked: t.status !== "available"
+    }));
   };
 
   // Fee calculations
@@ -1440,59 +1469,128 @@ export default function DashboardPage() {
     }
   };
 
-  const handlePlaceOrder = () => {
+  const saveOrderToSupabase = async (paymentId: string, paymentStatus: "paid" | "pending") => {
+    setIsSubmittingOrder(true);
+    const deliverTo = savedAddresses.find(a => a.id === selectedAddressId) || savedAddresses[0];
+
+    const { data, error } = await supabase.from("orders").insert({
+      user_id: user?.id,
+      items: cart.map(i => ({ id: i.id, name: i.name, price: i.price, quantity: i.quantity, image: i.image })),
+      subtotal: cartTotal,
+      fees: { gst: gstAmount, delivery: deliveryFee, platform: platformFee, tip: deliveryTip },
+      total: totalAmountPayable,
+      delivery_address: deliverTo.addressLine,
+      payment_status: paymentStatus,
+      payment_method: paymentOption.toUpperCase(),
+      order_status: "pending",
+      refund_status: "none"
+    }).select().single();
+
+    setIsSubmittingOrder(false);
+
+    if (error) {
+      showToast("Failed to save order: " + error.message, "error");
+      return;
+    }
+
+    const newOrder: Order = {
+      id: data.id,
+      date: data.created_at ? data.created_at.split("T")[0] : new Date().toISOString().split("T")[0],
+      items: data.items,
+      subtotal: data.subtotal,
+      fees: data.fees,
+      total: data.total,
+      status: "Order Placed",
+      address: deliverTo,
+      paymentMethod: paymentOption.toUpperCase(),
+      rider: {
+        name: "Rohan Sharma",
+        phone: "+91 98765 43210",
+        rating: "4.9",
+        avatar: "R"
+      }
+    };
+
+    setActiveOrder(newOrder);
+    
+    // Auto-update order history list locally as well
+    setOrderHistory(prev => [newOrder, ...prev]);
+
+    const earned = Math.round(totalAmountPayable / 10);
+    setLoyaltyPoints(prev => prev + earned);
+
+    clearCart();
+    setCouponCode("");
+    setAppliedVoucher(null);
+    setCouponStatus("idle");
+    setDeliveryTip(0);
+    setMapProgress(0);
+
+    setActiveTab("tracking");
+    showToast("Gourmet Order Placed Successfully!", "success");
+
+    sendInvoiceEmail(newOrder).then((res) => {
+      if (res.success) {
+        showToast(`Invoice PDF emailed to ${user?.email || "rethveeknalla@gmail.com"}!`, "success");
+      }
+    });
+  };
+
+  const handlePlaceOrder = async () => {
     if (cart.length === 0) {
       showToast("Your cart is empty", "error");
       return;
     }
-    
+
+    if (paymentOption === "cod") {
+      await saveOrderToSupabase("COD-CASH", "pending");
+      return;
+    }
+
+    // Load Razorpay Script for Digital Payment Checkout
     setIsSubmittingOrder(true);
-    const orderId = `FL-${Math.floor(100000 + Math.random() * 900000)}`;
-    const deliverTo = savedAddresses.find(a => a.id === selectedAddressId) || savedAddresses[0];
-
-    setTimeout(() => {
-      setIsSubmittingOrder(false);
-      
-      const newOrder: Order = {
-        id: orderId,
-        date: new Date().toISOString().split("T")[0],
-        items: cart.map(i => ({ id: i.id, name: i.name, price: i.price, quantity: i.quantity, image: i.image })),
-        subtotal: cartTotal,
-        fees: { gst: gstAmount, delivery: deliveryFee, platform: platformFee, tip: deliveryTip },
-        total: totalAmountPayable,
-        status: "Order Placed",
-        address: deliverTo,
-        paymentMethod: paymentOption.toUpperCase(),
-        rider: {
-          name: "Rohan Sharma",
-          phone: "+91 98765 43210",
-          rating: "4.9",
-          avatar: "R"
+    const loadScript = () => {
+      return new Promise((resolve) => {
+        if ((window as any).Razorpay) {
+          resolve(true);
+          return;
         }
-      };
-
-      setActiveOrder(newOrder);
-      setOrderHistory(prev => [newOrder, ...prev]);
-      
-      const earned = Math.round(totalAmountPayable / 10);
-      setLoyaltyPoints(prev => prev + earned);
-
-      clearCart();
-      setCouponCode("");
-      setAppliedVoucher(null);
-      setCouponStatus("idle");
-      setDeliveryTip(0);
-      setMapProgress(0);
-
-      setActiveTab("tracking");
-      showToast("Gourmet Order Placed Successfully!");
-
-      sendInvoiceEmail(newOrder).then((res) => {
-        if (res.success) {
-          showToast(`Invoice PDF emailed to ${user?.email || "rethveeknalla@gmail.com"}!`, "success");
-        }
+        const script = document.createElement("script");
+        script.src = "https://checkout.razorpay.com/v1/checkout.js";
+        script.onload = () => resolve(true);
+        script.onerror = () => resolve(false);
+        document.body.appendChild(script);
       });
-    }, 2000);
+    };
+
+    const isLoaded = await loadScript();
+    setIsSubmittingOrder(false);
+
+    if (!isLoaded) {
+      showToast("Failed to load Razorpay payment gateway script. Please check connection.", "error");
+      return;
+    }
+
+    const options = {
+      key: "rzp_test_FlavoraDemoKey",
+      amount: totalAmountPayable * 100, // paise
+      currency: "INR",
+      name: "Flavora Kitchen",
+      description: "Gourmet Selections Payment Checkout",
+      handler: async function (response: any) {
+        await saveOrderToSupabase(response.razorpay_payment_id || "PAY-SUCCESS", "paid");
+      },
+      prefill: {
+        name: user?.user_metadata?.name || "Valued Guest",
+        email: user?.email || ""
+      },
+      theme: {
+        color: "#f97316"
+      }
+    };
+
+    const rzp = new (window as any).Razorpay(options);
+    rzp.open();
   };
 
   // Simulated GPS Coordinates picker
@@ -1536,60 +1634,58 @@ export default function DashboardPage() {
   };
 
   // Place Reservation triggers
-  const handlePlaceReservation = (waitlist: boolean = false) => {
+  const handlePlaceReservation = async (waitlist: boolean = false) => {
     if (!bookingTableId && !waitlist) {
       showToast("Please select a physical table seating from the grid plan", "error");
       return;
     }
 
-    const bookingId = `FL-BOOK-${Math.floor(100000 + Math.random() * 900000)}`;
-    const newBooking: Booking = {
-      id: bookingId,
-      date: bookingDate,
-      time: bookingTime,
-      guests: bookingGuests,
-      duration: bookingDuration,
-      tableType: bookingTableType,
-      tableId: bookingTableId || `WL-${bookingTableType.substring(0, 2)}`,
-      event: bookingEvent,
-      diningPackage: bookingPackage,
-      requests: bookingRequests,
-      status: "Confirmed",
-      emailNotification,
-      smsNotification,
-      reminders: {
-        alert24h: false,
-        alert2h: false,
-        alertNav: false
-      },
-      waitlisted: waitlist,
-      waitlistPosition: waitlist ? Math.floor(1 + Math.random() * 3) : undefined
-    };
+    const { data: newRes, error } = await supabase.from("reservations").insert({
+      user_id: user?.id,
+      table_id: waitlist ? null : bookingTableId,
+      guest_name: user?.user_metadata?.name || "Valued Guest",
+      guest_count: bookingGuests,
+      reservation_date: bookingDate,
+      reservation_time: bookingTime,
+      occasion: bookingEvent,
+      dining_package: bookingPackage,
+      special_requests: bookingRequests.join(", "),
+      status: waitlist ? "pending" : "confirmed"
+    }).select().single();
 
-    setSavedBookings(prev => [newBooking, ...prev]);
+    if (error) {
+      showToast("Failed to place reservation: " + error.message, "error");
+      return;
+    }
 
-    // Deduct standard loyalty check bonus points for reserves
-    setLoyaltyPoints(p => p + 15); // Earn 15 loyalty points for reserving
+    if (!waitlist && bookingTableId) {
+      await supabase.from("restaurant_tables").update({ status: "reserved" }).eq("id", bookingTableId);
+    }
+
+    // Earn 15 loyalty points for reserving
+    setLoyaltyPoints(p => p + 15);
 
     // Reset inputs
     setBookingRequests([]);
     setBookingTableId(null);
     setBookingPackage("Standard Seating");
-    
+
     showToast(waitlist ? "Joined Table Seating Waitlist" : "Table Reserved successfully!");
   };
 
   // Management controls Reschedules
-  const handleRescheduleSubmit = () => {
+  const handleRescheduleSubmit = async () => {
     if (!rescheduleBookingTarget) return;
 
-    setSavedBookings(prev => 
-      prev.map(b => b.id === rescheduleBookingTarget.id ? { 
-        ...b, 
-        date: rescheduleDate, 
-        time: rescheduleTime 
-      } : b)
-    );
+    const { error } = await supabase.from("reservations").update({
+      reservation_date: rescheduleDate,
+      reservation_time: rescheduleTime
+    }).eq("id", rescheduleBookingTarget.id);
+
+    if (error) {
+      showToast("Failed to reschedule: " + error.message, "error");
+      return;
+    }
 
     setShowRescheduleModal(false);
     setRescheduleBookingTarget(null);
@@ -1597,16 +1693,18 @@ export default function DashboardPage() {
   };
 
   // Management controls Table Upgrades
-  const handleUpgradeSubmit = () => {
+  const handleUpgradeSubmit = async () => {
     if (!upgradeBookingTarget) return;
 
-    setSavedBookings(prev => 
-      prev.map(b => b.id === upgradeBookingTarget.id ? { 
-        ...b, 
-        tableType: upgradeTableType,
-        tableId: `${upgradeTableType.substring(0, 2)}-0${Math.floor(1 + Math.random() * 5)}`
-      } : b)
-    );
+    // Upgrades dining package in Supabase
+    const { error } = await supabase.from("reservations").update({
+      dining_package: upgradeTableType
+    }).eq("id", upgradeBookingTarget.id);
+
+    if (error) {
+      showToast("Failed to upgrade: " + error.message, "error");
+      return;
+    }
 
     setShowUpgradeModal(false);
     setUpgradeBookingTarget(null);
@@ -1614,15 +1712,17 @@ export default function DashboardPage() {
   };
 
   // Management controls Guest counts additions
-  const handleAddGuestsSubmit = () => {
+  const handleAddGuestsSubmit = async () => {
     if (!addGuestsTarget) return;
 
-    setSavedBookings(prev => 
-      prev.map(b => b.id === addGuestsTarget.id ? { 
-        ...b, 
-        guests: b.guests + addGuestsCount 
-      } : b)
-    );
+    const { error } = await supabase.from("reservations").update({
+      guest_count: addGuestsTarget.guests + addGuestsCount
+    }).eq("id", addGuestsTarget.id);
+
+    if (error) {
+      showToast("Failed to update guest count: " + error.message, "error");
+      return;
+    }
 
     setShowAddGuestsModal(false);
     setAddGuestsTarget(null);
@@ -1630,10 +1730,24 @@ export default function DashboardPage() {
   };
 
   // Management controls cancellations
-  const handleCancelBooking = (bookingId: string) => {
-    setSavedBookings(prev => 
-      prev.map(b => b.id === bookingId ? { ...b, status: "Cancelled" } : b)
-    );
+  const handleCancelBooking = async (bookingId: string) => {
+    const target = savedBookings.find(b => b.id === bookingId);
+    if (!target) return;
+
+    const { error } = await supabase.from("reservations").update({ status: "cancelled" }).eq("id", bookingId);
+    if (error) {
+      showToast("Failed to cancel reservation: " + error.message, "error");
+      return;
+    }
+
+    if (target.tableId && target.tableId !== "Not Assigned Yet") {
+      const matchNumber = parseInt(target.tableId.replace("Table ", ""));
+      const { data: tblData } = await supabase.from("restaurant_tables").select("id").eq("table_number", matchNumber).single();
+      if (tblData) {
+        await supabase.from("restaurant_tables").update({ status: "available" }).eq("id", tblData.id);
+      }
+    }
+
     showToast("Reservation cancelled successfully", "info");
 
     // Loop checklist to auto-notify any waitlisted users for this slot
@@ -2291,7 +2405,7 @@ export default function DashboardPage() {
                             src={dish.image} 
                             loading="lazy"
                             decoding="async"
-                            className={`w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 ${(dishStockOverrides[dish.id] || DISH_STOCK[dish.id] || "available") === 'sold_out' ? 'opacity-40 grayscale' : ''}`}
+                            className={`w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 ${getDishStockStatus(dish.id) === 'sold_out' ? 'opacity-40 grayscale' : ''}`}
                             alt={dish.name}
                             onError={(e) => {
                               (e.target as HTMLImageElement).src = "/images/truffle_dish.png";
@@ -2307,24 +2421,29 @@ export default function DashboardPage() {
                             <Heart size={14} className={favorites.includes(String(dish.id)) ? "text-red-500 fill-red-500" : ""} />
                           </button>
 
-                          <div className="absolute top-3 left-3 flex gap-1.5">
+                          <div className="absolute top-3 left-3 flex gap-1.5 flex-wrap max-w-[80%]">
                             <span className={`w-6 h-6 rounded-[6px] border flex items-center justify-center bg-black/80 backdrop-blur-sm shadow-[0_0_8px_rgba(${dish.isVeg ? '34,197,94' : '239,68,68'},0.2)] ${dish.isVeg ? 'border-green-500' : 'border-red-500'}`}>
                               <span className={`w-2 h-2 rounded-full ${dish.isVeg ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
                             </span>
                             {dish.isVegan && (
                               <span className="bg-green-600/90 text-white text-[8px] font-black uppercase px-2 py-0.5 rounded shadow flex items-center">Vegan</span>
                             )}
+                            {isDishSellingFast(dish.id) && (
+                              <span className="bg-orange-500 text-black text-[8px] font-black uppercase px-2 py-0.5 rounded shadow-lg flex items-center gap-0.5 animate-pulse">
+                                🔥 Selling Fast
+                              </span>
+                            )}
                           </div>
 
                           {/* Stock status badge (Tier 2: Inventory) */}
-                          {(dishStockOverrides[dish.id] || DISH_STOCK[dish.id] || "available") === "sold_out" && (
+                          {getDishStockStatus(dish.id) === "sold_out" && (
                             <div className="absolute inset-0 flex items-center justify-center bg-black/60 rounded-2xl">
                               <span className="bg-red-600 text-white text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-full flex items-center gap-1.5 shadow-lg">
                                 <Package size={10} /> Sold Out
                               </span>
                             </div>
                           )}
-                          {(dishStockOverrides[dish.id] || DISH_STOCK[dish.id] || "available") === "low" && (
+                          {getDishStockStatus(dish.id) === "low" && (
                             <div className="absolute bottom-10 left-3">
                               <span className="bg-amber-500/90 text-black text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-full flex items-center gap-1 shadow">
                                 <AlertTriangle size={9} /> Low Stock
@@ -2358,7 +2477,7 @@ export default function DashboardPage() {
                           <span className="text-[9px] uppercase font-mono tracking-widest text-cream/30">Mild</span>
                         )}
 
-                        {(dishStockOverrides[dish.id] || DISH_STOCK[dish.id] || "available") === "sold_out" ? (
+                        {getDishStockStatus(dish.id) === "sold_out" ? (
                           <span className="px-4 py-2 border border-red-500/30 bg-red-500/10 text-red-400 rounded-xl text-xs font-bold opacity-60 select-none">
                             Unavailable
                           </span>

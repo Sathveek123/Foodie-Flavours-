@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import { 
-  LogIn, Mail, Lock, ArrowLeft, AlertCircle, TrendingUp, ShoppingBag, Calendar, 
-  Star, Package, AlertTriangle, CheckCircle, RefreshCw, X, ShieldAlert, 
-  Trash2, User, Phone, Users, Clock, Compass, DollarSign, Edit
+  LogIn, Mail, Lock, ArrowLeft, AlertCircle, ShoppingBag, Calendar, 
+  RefreshCw, X, ShieldAlert, Trash2, Edit, Check, Users, DollarSign, Flame
 } from "lucide-react";
+import { supabase } from "../lib/supabaseClient";
 import { DISH_DATA } from "../components/MenuPreviewTabs";
 
 // Shared Stock Status Type
@@ -31,12 +31,10 @@ interface Order {
     tip: number;
   };
   total: number;
-  status: "Order Placed" | "Accepted" | "Preparing" | "Packed" | "Out For Delivery" | "Delivered" | "Cancelled";
-  address: {
-    type: string;
-    addressLine: string;
-  };
+  status: "pending" | "accepted" | "preparing" | "packed" | "out_for_delivery" | "delivered" | "cancelled";
+  address: string;
   paymentMethod: string;
+  paymentStatus: "pending" | "paid" | "failed" | "refunded";
   refundStatus?: "none" | "requested" | "processing" | "completed" | "denied";
 }
 
@@ -46,11 +44,19 @@ interface Booking {
   time: string;
   guests: number;
   tableType: string;
-  tableId: string;
-  status: "Confirmed" | "Seated" | "Completed" | "Cancelled";
+  tableId: string; // References database table ID or number
+  tableNumber?: number;
+  status: "pending" | "confirmed" | "cancelled" | "completed";
   name: string;
   phone: string;
   waitlisted?: boolean;
+}
+
+interface RestaurantTable {
+  id: string;
+  table_number: number;
+  capacity: number;
+  status: "available" | "reserved" | "occupied" | "cleaning";
 }
 
 interface WaitlistEntry {
@@ -74,43 +80,153 @@ export default function AdminPage() {
 
   const [activeTab, setActiveTab] = useState<"overview" | "orders" | "bookings" | "stock" | "waitlist">("overview");
 
-  // Dynamic Data States loaded from localStorage
+  // Dynamic Data States loaded from Supabase
   const [orders, setOrders] = useState<Order[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [waitlist, setWaitlist] = useState<WaitlistEntry[]>([]);
-  const [stockOverrides, setStockOverrides] = useState<Record<number, StockStatus>>({});
+  const [tables, setTables] = useState<RestaurantTable[]>([]);
+  const [foodItemsState, setFoodItemsState] = useState<any[]>([]);
+  const [userCount, setUserCount] = useState(0);
 
   // Form edit states
   const [editingBooking, setEditingBooking] = useState<Booking | null>(null);
   const [rescheduleDate, setRescheduleDate] = useState("");
   const [rescheduleTime, setRescheduleTime] = useState("");
+  const [selectedTableIdForBooking, setSelectedTableIdForBooking] = useState<string>("");
 
   // Load Admin Data on mount
   useEffect(() => {
     if (adminToken) {
       loadData();
+
+      // Realtime subscription channels for instantaneous updates
+      const orderChannel = supabase
+        .channel("admin-orders-sync")
+        .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => {
+          fetchOrders();
+        })
+        .subscribe();
+
+      const resChannel = supabase
+        .channel("admin-reservations-sync")
+        .on("postgres_changes", { event: "*", schema: "public", table: "reservations" }, () => {
+          fetchReservations();
+        })
+        .subscribe();
+
+      const tableChannel = supabase
+        .channel("admin-tables-sync")
+        .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_tables" }, () => {
+          fetchTables();
+        })
+        .subscribe();
+
+      const profilesChannel = supabase
+        .channel("admin-profiles-sync")
+        .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => {
+          fetchUserCount();
+        })
+        .subscribe();
+
+      const foodChannel = supabase
+        .channel("admin-food-sync")
+        .on("postgres_changes", { event: "*", schema: "public", table: "food_items" }, () => {
+          fetchFoodItems();
+        })
+        .subscribe();
+
+      return () => {
+        supabase.removeChannel(orderChannel);
+        supabase.removeChannel(resChannel);
+        supabase.removeChannel(tableChannel);
+        supabase.removeChannel(profilesChannel);
+        supabase.removeChannel(foodChannel);
+      };
     }
   }, [adminToken]);
 
   const loadData = () => {
-    try {
-      // 1. Orders
-      const storedOrders = localStorage.getItem("flavora_order_history");
-      setOrders(storedOrders ? JSON.parse(storedOrders) : []);
+    fetchOrders();
+    fetchReservations();
+    fetchTables();
+    fetchUserCount();
+    fetchFoodItems();
+  };
 
-      // 2. Bookings
-      const storedBookings = localStorage.getItem("flavora_bookings");
-      setBookings(storedBookings ? JSON.parse(storedBookings) : []);
+  // 1. Fetch Orders
+  const fetchOrders = async () => {
+    const { data, error } = await supabase.from("orders").select("*").order("created_at", { ascending: false });
+    if (!error && data) {
+      setOrders(data.map((o: any) => ({
+        id: o.id,
+        date: o.created_at ? o.created_at.split("T")[0] : "",
+        items: o.items,
+        subtotal: parseFloat(o.subtotal),
+        fees: o.fees,
+        total: parseFloat(o.total),
+        status: o.order_status,
+        address: o.delivery_address,
+        paymentMethod: o.payment_method,
+        paymentStatus: o.payment_status,
+        refundStatus: o.refund_status
+      })));
+    }
+  };
 
-      // 3. Waitlist
-      const storedWaitlist = localStorage.getItem("flavora_waitlist");
-      setWaitlist(storedWaitlist ? JSON.parse(storedWaitlist) : []);
+  // 2. Fetch Reservations
+  const fetchReservations = async () => {
+    const { data, error } = await supabase.from("reservations").select("*, restaurant_tables(table_number)").order("created_at", { ascending: false });
+    if (!error && data) {
+      // Confirmed bookings (where table_id is assigned)
+      const confirmedList: Booking[] = data.filter((b: any) => b.table_id !== null || b.status !== "pending").map((b: any) => ({
+        id: b.id,
+        date: b.reservation_date,
+        time: b.reservation_time,
+        guests: b.guest_count,
+        tableType: b.dining_package || "Standard Seating",
+        tableId: b.table_id || "",
+        tableNumber: b.restaurant_tables?.table_number,
+        status: b.status,
+        name: b.guest_name,
+        phone: b.phone || ""
+      }));
+      setBookings(confirmedList);
 
-      // 4. Stock status overrides
-      const storedStock = localStorage.getItem("flavora_dish_stock_overrides");
-      setStockOverrides(storedStock ? JSON.parse(storedStock) : {});
-    } catch (e) {
-      console.error("Failed to load admin data state:", e);
+      // Pending queue (Waitlist) where table_id is null
+      const waitlistQueue: WaitlistEntry[] = data.filter((b: any) => b.table_id === null && b.status === "pending").map((b: any, idx: number) => ({
+        id: b.id,
+        name: b.guest_name,
+        guests: b.guest_count,
+        phone: b.phone || "",
+        joinedAt: b.created_at,
+        position: idx + 1,
+        status: b.status === "pending" ? "waiting" : "ready"
+      }));
+      setWaitlist(waitlistQueue);
+    }
+  };
+
+  // 3. Fetch Seating Tables
+  const fetchTables = async () => {
+    const { data, error } = await supabase.from("restaurant_tables").select("*").order("table_number", { ascending: true });
+    if (!error && data) {
+      setTables(data);
+    }
+  };
+
+  // 4. Fetch Users Count
+  const fetchUserCount = async () => {
+    const { count, error } = await supabase.from("profiles").select("*", { count: "exact", head: true });
+    if (!error && count !== null) {
+      setUserCount(count);
+    }
+  };
+
+  // 5. Fetch Food Items (stock catalog status)
+  const fetchFoodItems = async () => {
+    const { data, error } = await supabase.from("food_items").select("*");
+    if (!error && data) {
+      setFoodItemsState(data);
     }
   };
 
@@ -138,91 +254,135 @@ export default function AdminPage() {
     setAdminToken(null);
   };
 
-  // 1. Update Order Status
-  const handleUpdateOrderStatus = (orderId: string, nextStatus: Order["status"]) => {
-    const updated = orders.map(o => o.id === orderId ? { ...o, status: nextStatus } : o);
-    setOrders(updated);
-    localStorage.setItem("flavora_order_history", JSON.stringify(updated));
-    showToast(`Order #${orderId} set to [${nextStatus}]`);
-  };
-
-  // 2. Update Refund Status
-  const handleUpdateRefundStatus = (orderId: string, nextRefund: Order["refundStatus"]) => {
-    const updated = orders.map(o => o.id === orderId ? { ...o, refundStatus: nextRefund } : o);
-    setOrders(updated);
-    localStorage.setItem("flavora_order_history", JSON.stringify(updated));
-    
-    if (nextRefund === "completed") {
-      // Mock Sandbox payment refund alert
-      showToast(`💸 Refund of Order #${orderId} completed! (Stripe/Razorpay API simulated)`, "success");
+  // 1. Advance Order Status
+  const handleUpdateOrderStatus = async (orderId: string, nextStatus: Order["status"]) => {
+    const { error } = await supabase.from("orders").update({ order_status: nextStatus }).eq("id", orderId);
+    if (error) {
+      showToast("Error updating order status: " + error.message, "info");
     } else {
-      showToast(`Refund state of #${orderId} updated to: ${nextRefund}`);
+      showToast(`Order status updated to [${nextStatus}]`, "success");
+      fetchOrders();
     }
   };
 
-  // 3. Update Booking Status
-  const handleUpdateBookingStatus = (bookingId: string, nextStatus: Booking["status"]) => {
-    const updated = bookings.map(b => b.id === bookingId ? { ...b, status: nextStatus } : b);
-    setBookings(updated);
-    localStorage.setItem("flavora_bookings", JSON.stringify(updated));
-    showToast(`Booking #${bookingId} status updated to: ${nextStatus}`);
+  // 2. Manage Refund status
+  const handleUpdateRefundStatus = async (orderId: string, nextRefund: Order["refundStatus"]) => {
+    const { error } = await supabase.from("orders").update({ refund_status: nextRefund }).eq("id", orderId);
+    if (error) {
+      showToast("Error updating refund status: " + error.message, "info");
+    } else {
+      showToast(`Refund status set to: ${nextRefund}`, "success");
+      fetchOrders();
+    }
   };
 
-  // 4. Update Seating Reservation Schedule
-  const handleRescheduleBookingSubmit = (e: React.FormEvent) => {
+  // 3. Confirm Table Reservation check-in / Complete Seating
+  const handleUpdateBookingStatus = async (bookingId: string, nextStatus: Booking["status"], tableId?: string) => {
+    const { error } = await supabase.from("reservations").update({ status: nextStatus }).eq("id", bookingId);
+    if (error) {
+      showToast("Error updating reservation status: " + error.message, "info");
+      return;
+    }
+
+    // If dining finished or cancelled, free table
+    if (tableId && (nextStatus === "completed" || nextStatus === "cancelled")) {
+      await supabase.from("restaurant_tables").update({ status: "available" }).eq("id", tableId);
+    } else if (tableId && nextStatus === "confirmed") {
+      await supabase.from("restaurant_tables").update({ status: "reserved" }).eq("id", tableId);
+    }
+
+    showToast(`Reservation #${bookingId.substring(0, 8)} set to: ${nextStatus.toUpperCase()}`, "success");
+    fetchReservations();
+    fetchTables();
+  };
+
+  // 4. Assign physical table to Booking (Seat waitlisted guests)
+  const handleAssignTableToBooking = async (bookingId: string) => {
+    if (!selectedTableIdForBooking) {
+      showToast("Please choose an available seating table", "info");
+      return;
+    }
+
+    // 1. Assign table to reservation
+    const { error } = await supabase.from("reservations").update({
+      table_id: selectedTableIdForBooking,
+      status: "confirmed"
+    }).eq("id", bookingId);
+
+    if (error) {
+      showToast("Error assigning table: " + error.message, "info");
+      return;
+    }
+
+    // 2. Set table status to reserved
+    await supabase.from("restaurant_tables").update({ status: "reserved" }).eq("id", selectedTableIdForBooking);
+
+    showToast("Guest seated and table assigned successfully!", "success");
+    setSelectedTableIdForBooking("");
+    fetchReservations();
+    fetchTables();
+  };
+
+  // 5. Update Seating Reservation Schedule
+  const handleRescheduleBookingSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingBooking || !rescheduleDate || !rescheduleTime) return;
 
-    const updated = bookings.map(b => 
-      b.id === editingBooking.id 
-        ? { ...b, date: rescheduleDate, time: rescheduleTime } 
-        : b
-    );
-    setBookings(updated);
-    localStorage.setItem("flavora_bookings", JSON.stringify(updated));
-    setEditingBooking(null);
-    showToast(`Booking #${editingBooking.id} rescheduled successfully!`, "success");
+    const { error } = await supabase.from("reservations").update({
+      reservation_date: rescheduleDate,
+      reservation_time: rescheduleTime
+    }).eq("id", editingBooking.id);
+
+    if (error) {
+      showToast("Error rescheduling reservation: " + error.message, "info");
+    } else {
+      showToast(`Reservation rescheduled successfully!`, "success");
+      setEditingBooking(null);
+      fetchReservations();
+    }
   };
 
-  // 5. Update Seating Guest Count
-  const handleUpdateGuestCount = (bookingId: string, change: number) => {
-    const updated = bookings.map(b => {
-      if (b.id === bookingId) {
-        const next = Math.max(1, b.guests + change);
-        return { ...b, guests: next };
-      }
-      return b;
+  // 6. Manage Menu Dish Stock and FOMO flags
+  const handleToggleDishStock = async (dishId: number, dishName: string, category: string, price: number, nextStock: StockStatus) => {
+    const isAvail = nextStock !== "sold_out";
+    
+    // Upsert into Supabase food_items catalog
+    const { error } = await supabase.from("food_items").upsert({
+      id: dishId,
+      name: dishName,
+      category,
+      price,
+      is_available: isAvail,
+      stock_status: nextStock
     });
-    setBookings(updated);
-    localStorage.setItem("flavora_bookings", JSON.stringify(updated));
-    showToast(`Guest count updated!`);
+
+    if (error) {
+      showToast("Failed to update inventory: " + error.message, "info");
+    } else {
+      showToast(`${dishName} stock set to: ${nextStock.toUpperCase()}`, "success");
+      fetchFoodItems();
+    }
   };
 
-  // 6. Manage Menu Dish Stock Override
-  const handleToggleDishStock = (dishId: number, nextStock: StockStatus) => {
-    const nextOverrides = { ...stockOverrides, [dishId]: nextStock };
-    setStockOverrides(nextOverrides);
-    localStorage.setItem("flavora_dish_stock_overrides", JSON.stringify(nextOverrides));
-    showToast(`Dish #${dishId} stock set to: ${nextStock.toUpperCase()}`);
+  // Toggle dynamic Selling Fast flag (FOMO Badge)
+  const handleToggleSellingFast = async (dishId: number, dishName: string, category: string, price: number, currentVal: boolean) => {
+    const { error } = await supabase.from("food_items").upsert({
+      id: dishId,
+      name: dishName,
+      category,
+      price,
+      is_selling_fast: !currentVal
+    });
+
+    if (error) {
+      showToast("Failed to update FOMO tag: " + error.message, "info");
+    } else {
+      showToast(`${dishName} FOMO badge toggled!`, "success");
+      fetchFoodItems();
+    }
   };
 
-  // 7. Manage Waitlist promotion
-  const handlePromoteWaitlist = (entryId: string, nextStatus: WaitlistEntry["status"]) => {
-    const updated = waitlist.map(w => w.id === entryId ? { ...w, status: nextStatus } : w);
-    setWaitlist(updated);
-    localStorage.setItem("flavora_waitlist", JSON.stringify(updated));
-    showToast(`Waitlist guest promoted to: ${nextStatus.toUpperCase()}`);
-  };
-
-  // Delete waitlist item
-  const handleDeleteWaitlist = (entryId: string) => {
-    const filtered = waitlist.filter(w => w.id !== entryId);
-    setWaitlist(filtered);
-    localStorage.setItem("flavora_waitlist", JSON.stringify(filtered));
-    showToast(`Waitlist entry removed`);
-  };
-
-  // Quick Toast Alerts
+  // Toast Alerts
   const [toastText, setToastText] = useState("");
   const [toastType, setToastType] = useState<"success" | "info">("info");
   const [toastVisible, setToastVisible] = useState(false);
@@ -240,15 +400,14 @@ export default function AdminPage() {
     }
   }, [toastVisible]);
 
-  // Analytics Math
-  const totalRevenue = orders.filter(o => o.status !== "Cancelled").reduce((sum, o) => sum + o.total, 0);
-  const activeOrdersCount = orders.filter(o => o.status !== "Delivered" && o.status !== "Cancelled").length;
-  const bookedTablesCount = bookings.filter(b => b.status === "Confirmed" || b.status === "Seated").length;
+  // Math Metrics
+  const totalRevenue = orders.filter(o => o.status !== "cancelled").reduce((sum, o) => sum + o.total, 0);
+  const activeOrdersCount = orders.filter(o => o.status !== "delivered" && o.status !== "cancelled").length;
+  const bookedTablesCount = tables.filter(t => t.status === "reserved" || t.status === "occupied").length;
   const refundCount = orders.filter(o => o.refundStatus && o.refundStatus !== "none").length;
 
   return (
     <div className="min-h-screen bg-[#0d0a08] font-sans text-cream select-none relative overflow-x-hidden">
-      {/* Background visual assets */}
       <div 
         className="absolute inset-0 z-0 bg-cover bg-center bg-no-repeat opacity-5 filter blur-[3px] pointer-events-none" 
         style={{ backgroundImage: "url('/images/combo_deal.png')" }}
@@ -256,7 +415,6 @@ export default function AdminPage() {
       <div className="absolute inset-0 bg-gradient-to-b from-[#0d0a08]/90 via-[#0d0a08]/95 to-[#0d0a08] z-0 pointer-events-none" />
       <div className="noise-overlay pointer-events-none" />
 
-      {/* Dynamic glow bloom */}
       <div
         className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] rounded-full pointer-events-none z-0 opacity-40"
         style={{
@@ -267,7 +425,7 @@ export default function AdminPage() {
 
       <AnimatePresence mode="wait">
         {!adminToken ? (
-          /* LOGIN CARD GATED PANEL */
+          /* AUTH CARD GATED */
           <motion.div
             key="login"
             initial={{ opacity: 0, y: 30 }}
@@ -350,14 +508,14 @@ export default function AdminPage() {
             </div>
           </motion.div>
         ) : (
-          /* ADMIN WORKSPACE PANEL */
+          /* ADMIN WORKSPACE */
           <motion.div
             key="workspace"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             className="max-w-7xl mx-auto px-4 py-8 relative z-10 space-y-8 select-none"
           >
-            {/* Header branding strip */}
+            {/* Top Branding Panel */}
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white/[0.01] border border-white/5 rounded-3xl p-6 shadow-2xl relative overflow-hidden text-left">
               <div className="noise-overlay" />
               <div>
@@ -383,7 +541,7 @@ export default function AdminPage() {
               </div>
             </div>
 
-            {/* Metrics cards grid */}
+            {/* KPI Cards Grid */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6 font-sans">
               <div className="bg-white/[0.01] border border-white/5 rounded-2xl p-5 relative overflow-hidden text-left">
                 <span className="text-[9px] uppercase tracking-widest text-cream/40 block">Gross Sales Revenue</span>
@@ -402,24 +560,24 @@ export default function AdminPage() {
                 <ShoppingBag className="absolute right-3 bottom-3 opacity-5 text-white" size={40} />
               </div>
               <div className="bg-white/[0.01] border border-white/5 rounded-2xl p-5 relative overflow-hidden text-left">
-                <span className="text-[9px] uppercase tracking-widest text-cream/40 block">Seated Bookings</span>
+                <span className="text-[9px] uppercase tracking-widest text-cream/40 block">Booked Seating Tables</span>
                 <div className="flex justify-between items-baseline mt-2">
-                  <h3 className="text-xl md:text-2xl font-mono font-black text-white">{bookedTablesCount} guests</h3>
-                  <span className="text-[9px] text-green-500 font-bold font-mono">Active Seating</span>
+                  <h3 className="text-xl md:text-2xl font-mono font-black text-white">{bookedTablesCount} / {tables.length}</h3>
+                  <span className="text-[9px] text-green-500 font-bold font-mono">Table Status</span>
                 </div>
                 <Calendar className="absolute right-3 bottom-3 opacity-5 text-white" size={40} />
               </div>
               <div className="bg-white/[0.01] border border-white/5 rounded-2xl p-5 relative overflow-hidden text-left">
-                <span className="text-[9px] uppercase tracking-widest text-cream/40 block">Refund Transactions</span>
+                <span className="text-[9px] uppercase tracking-widest text-cream/40 block">Registered Club Users</span>
                 <div className="flex justify-between items-baseline mt-2">
-                  <h3 className="text-xl md:text-2xl font-mono font-black text-red-400">{refundCount} alerts</h3>
-                  <span className="text-[9px] text-red-500 font-bold font-mono">Action Required</span>
+                  <h3 className="text-xl md:text-2xl font-mono font-black text-white">{userCount} users</h3>
+                  <span className="text-[9px] text-green-500 font-bold font-mono">Total Database</span>
                 </div>
-                <ShieldAlert className="absolute right-3 bottom-3 opacity-5 text-white" size={40} />
+                <Users className="absolute right-3 bottom-3 opacity-5 text-white" size={40} />
               </div>
             </div>
 
-            {/* Main tab control buttons */}
+            {/* Tab Controllers */}
             <div className="flex border-b border-white/5 gap-2 md:gap-4 overflow-x-auto no-scrollbar font-sans py-1">
               {[
                 { id: "overview", label: "📊 Sales Overview" },
@@ -442,14 +600,14 @@ export default function AdminPage() {
               ))}
             </div>
 
-            {/* Tab contents wrapper */}
+            {/* Tab view Panels */}
             <div className="relative font-sans text-left">
 
-              {/* TAB 1: OVERVIEW & GENERAL LOGS */}
+              {/* TAB 1: SALES OVERVIEW */}
               {activeTab === "overview" && (
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start animate-fadeIn">
                   <div className="lg:col-span-8 bg-white/[0.01] border border-white/5 rounded-3xl p-6 space-y-6 relative overflow-hidden">
-                    <h4 className="font-serif font-black text-white text-lg">Recent Checkout Orders</h4>
+                    <h4 className="font-serif font-black text-white text-lg">Recent Supabase Orders</h4>
                     {orders.length === 0 ? (
                       <p className="text-xs text-cream/40 italic">No checkout history available.</p>
                     ) : (
@@ -460,7 +618,7 @@ export default function AdminPage() {
                               <th className="py-3 px-2">Order ID</th>
                               <th className="py-3 px-2">Date</th>
                               <th className="py-3 px-2">Items Count</th>
-                              <th className="py-3 px-2">Grand Total</th>
+                              <th className="py-3 px-2">Total Amount</th>
                               <th className="py-3 px-2">Delivery Status</th>
                               <th className="py-3 px-2">Payment</th>
                             </tr>
@@ -468,19 +626,19 @@ export default function AdminPage() {
                           <tbody>
                             {orders.slice(0, 5).map(o => (
                               <tr key={o.id} className="border-b border-white/5 hover:bg-white/[0.01]">
-                                <td className="py-3.5 px-2 font-mono font-bold text-white">{o.id}</td>
+                                <td className="py-3.5 px-2 font-mono font-bold text-white max-w-[120px] truncate" title={o.id}>{o.id.substring(0, 8)}...</td>
                                 <td className="py-3.5 px-2 text-cream/60">{o.date}</td>
-                                <td className="py-3.5 px-2">{o.items.reduce((sum, i) => sum + i.quantity, 0)} items</td>
+                                <td className="py-3.5 px-2">{o.items?.reduce((sum, i) => sum + i.quantity, 0) || 0} items</td>
                                 <td className="py-3.5 px-2 text-orange-500 font-mono font-bold">₹{o.total}</td>
                                 <td className="py-3.5 px-2">
                                   <span className={`px-2.5 py-1 rounded-full text-[9px] font-bold uppercase ${
-                                    o.status === "Delivered" ? "bg-green-500/10 text-green-400" :
-                                    o.status === "Cancelled" ? "bg-red-500/10 text-red-400" : "bg-orange-500/10 text-orange-400"
+                                    o.status === "delivered" ? "bg-green-500/10 text-green-400" :
+                                    o.status === "cancelled" ? "bg-red-500/10 text-red-400" : "bg-orange-500/10 text-orange-400"
                                   }`}>
                                     {o.status}
                                   </span>
                                 </td>
-                                <td className="py-3.5 px-2 font-mono text-[10px]">{o.paymentMethod}</td>
+                                <td className="py-3.5 px-2 font-mono text-[10px]">{o.paymentMethod} &middot; <span className={o.paymentStatus === "paid" ? "text-green-400" : "text-yellow-400"}>{o.paymentStatus}</span></td>
                               </tr>
                             ))}
                           </tbody>
@@ -490,15 +648,15 @@ export default function AdminPage() {
                   </div>
 
                   <div className="lg:col-span-4 bg-white/[0.02] border border-white/5 rounded-3xl p-6 space-y-6">
-                    <h4 className="font-serif font-black text-white text-base">Payment Analytics</h4>
+                    <h4 className="font-serif font-black text-white text-base">Payment Distribution</h4>
                     <div className="space-y-4">
-                      {["UPI", "CARD", "COD", "SPLIT"].map(method => {
+                      {["UPI", "CARD", "COD"].map(method => {
                         const sum = orders.filter(o => o.paymentMethod === method).reduce((s, o) => s + o.total, 0);
                         const pct = totalRevenue > 0 ? Math.round((sum / totalRevenue) * 100) : 0;
                         return (
                           <div key={method} className="space-y-2">
                             <div className="flex justify-between text-xs font-mono">
-                              <span className="text-white font-bold">{method} Orders</span>
+                              <span className="text-white font-bold">{method}</span>
                               <span className="text-cream/50">₹{sum.toLocaleString("en-IN")} ({pct}%)</span>
                             </div>
                             <div className="w-full h-1.5 bg-white/5 rounded-full overflow-hidden">
@@ -518,7 +676,7 @@ export default function AdminPage() {
                   {orders.length === 0 ? (
                     <div className="py-16 text-center bg-white/[0.01] border border-white/5 rounded-3xl text-cream/40">
                       <ShoppingBag className="mx-auto mb-4 opacity-25 text-orange-500" size={36} />
-                      <p className="font-serif italic text-sm">No checkout orders registered yet.</p>
+                      <p className="font-serif italic text-sm">No orders registered in the system yet.</p>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -527,13 +685,18 @@ export default function AdminPage() {
                           <div className="flex justify-between items-start border-b border-white/5 pb-3">
                             <div className="text-left">
                               <span className="text-[10px] font-mono text-cream/45">{order.date}</span>
-                              <h5 className="font-mono text-sm font-bold text-white mt-0.5">Order ID: #{order.id}</h5>
+                              <h5 className="font-mono text-xs font-bold text-white mt-0.5">Order ID: #{order.id}</h5>
                             </div>
-                            <span className="text-orange-500 font-mono font-bold text-sm">₹{order.total}</span>
+                            <div className="text-right">
+                              <span className="text-orange-500 font-mono font-bold text-sm block">₹{order.total}</span>
+                              <span className={`text-[8px] font-mono font-bold uppercase ${order.paymentStatus === 'paid' ? 'text-green-400' : 'text-yellow-500'}`}>
+                                {order.paymentStatus} ({order.paymentMethod})
+                              </span>
+                            </div>
                           </div>
 
                           <div className="space-y-1.5 text-xs text-cream/70 text-left font-sans">
-                            {order.items.map((i, idx) => (
+                            {order.items?.map((i, idx) => (
                               <div key={idx} className="flex justify-between">
                                 <span>{i.quantity}x {i.name}</span>
                                 <span className="font-mono opacity-50">₹{i.price * i.quantity}</span>
@@ -542,14 +705,14 @@ export default function AdminPage() {
                           </div>
 
                           <div className="text-[10px] text-cream/45 border-t border-white/5 pt-3 text-left leading-relaxed">
-                            📍 <strong>Address:</strong> {order.address?.addressLine}
+                            📍 <strong>Delivery Address:</strong> {order.address}
                           </div>
 
                           <div className="flex flex-wrap gap-3 items-center justify-between border-t border-white/5 pt-4">
                             <div className="space-y-1.5 text-left">
                               <span className="text-[8px] uppercase tracking-wider text-cream/40 font-mono block">Advance Status</span>
                               <div className="flex gap-1.5 flex-wrap">
-                                {["Accepted", "Preparing", "Packed", "Out For Delivery", "Delivered"].map(status => (
+                                {["accepted", "preparing", "packed", "out_for_delivery", "delivered"].map(status => (
                                   <button
                                     key={status}
                                     onClick={() => handleUpdateOrderStatus(order.id, status as any)}
@@ -559,13 +722,13 @@ export default function AdminPage() {
                                         : "bg-white/5 border-white/10 hover:border-white/20 text-cream"
                                     }`}
                                   >
-                                    {status.split(" ").map(s => s[0]).join("")}
+                                    {status.split("_").map(s => s[0]).join("")}
                                   </button>
                                 ))}
                                 <button
-                                  onClick={() => handleUpdateOrderStatus(order.id, "Cancelled")}
+                                  onClick={() => handleUpdateOrderStatus(order.id, "cancelled")}
                                   className={`px-2.5 py-1 border rounded-lg text-[9px] font-bold transition cursor-pointer ${
-                                    order.status === "Cancelled" 
+                                    order.status === "cancelled" 
                                       ? "bg-red-500 border-red-500 text-white" 
                                       : "bg-red-500/10 border-red-500/20 text-red-400"
                                   }`}
@@ -577,7 +740,7 @@ export default function AdminPage() {
 
                             {/* Refund Manager */}
                             <div className="space-y-1.5 text-left">
-                              <span className="text-[8px] uppercase tracking-wider text-cream/40 font-mono block">Refund Status Ledger</span>
+                              <span className="text-[8px] uppercase tracking-wider text-cream/40 font-mono block">Refund Status</span>
                               <div className="flex gap-1.5">
                                 <select
                                   value={order.refundStatus || "none"}
@@ -606,7 +769,7 @@ export default function AdminPage() {
                   {bookings.length === 0 ? (
                     <div className="py-16 text-center bg-white/[0.01] border border-white/5 rounded-3xl text-cream/40">
                       <Calendar className="mx-auto mb-4 opacity-25 text-orange-500" size={36} />
-                      <p className="font-serif italic text-sm">No dine-in table bookings recorded yet.</p>
+                      <p className="font-serif italic text-sm">No dine-in bookings found.</p>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -615,48 +778,40 @@ export default function AdminPage() {
                           <div className="flex justify-between items-start border-b border-white/5 pb-3">
                             <div className="text-left">
                               <span className="text-[10px] font-mono text-orange-500 font-bold uppercase tracking-wider">
-                                Booking: #{book.id}
+                                Booking ID: #{book.id.substring(0, 8)}...
                               </span>
                               <h5 className="font-serif font-black text-white text-base mt-0.5">{book.name}</h5>
                             </div>
                             <span className={`px-2.5 py-1 rounded-full text-[9px] font-bold uppercase ${
-                              book.status === "Completed" ? "bg-green-500/10 text-green-400" :
-                              book.status === "Cancelled" ? "bg-red-500/10 text-red-400" : "bg-orange-500/10 text-orange-400"
+                              book.status === "completed" ? "bg-green-500/10 text-green-400" :
+                              book.status === "cancelled" ? "bg-red-500/10 text-red-400" : "bg-orange-500/10 text-orange-400"
                             }`}>
                               {book.status}
                             </span>
                           </div>
 
                           <div className="grid grid-cols-2 gap-4 text-xs font-sans text-left text-cream/70">
-                            <div>📞 <strong>Phone:</strong> {book.phone}</div>
+                            <div>📞 <strong>Phone:</strong> {book.phone || "No Phone"}</div>
                             <div>👥 <strong>Guests size:</strong> {book.guests} persons</div>
                             <div>📅 <strong>Schedule:</strong> {book.date}</div>
                             <div>⏰ <strong>Slot time:</strong> {book.time}</div>
-                            <div className="col-span-2">🛋️ <strong>Seating Table:</strong> {book.tableType} ({book.tableId})</div>
+                            <div className="col-span-2">🛋️ <strong>Seating Table:</strong> {book.tableNumber ? `Table ${book.tableNumber}` : "Not Assigned"}</div>
                           </div>
 
                           <div className="flex flex-wrap gap-2.5 pt-3 border-t border-white/5 items-center justify-between">
                             <div className="flex gap-2">
-                              {/* Seating advancement toggles */}
-                              {book.status === "Confirmed" && (
+                              {/* Seating check-in toggles */}
+                              {book.status === "confirmed" && (
                                 <button
-                                  onClick={() => handleUpdateBookingStatus(book.id, "Seated")}
-                                  className="px-3 py-1.5 bg-orange-500 text-[#0d0a08] text-[10px] font-bold rounded-lg transition hover:bg-orange-400 cursor-pointer"
-                                >
-                                  Host check-in (Seat)
-                                </button>
-                              )}
-                              {book.status === "Seated" && (
-                                <button
-                                  onClick={() => handleUpdateBookingStatus(book.id, "Completed")}
+                                  onClick={() => handleUpdateBookingStatus(book.id, "completed", book.tableId)}
                                   className="px-3 py-1.5 bg-green-500 text-[#0d0a08] text-[10px] font-bold rounded-lg transition hover:bg-green-400 cursor-pointer"
                                 >
-                                  End Dining
+                                  End Seating &amp; Free Table
                                 </button>
                               )}
-                              {book.status !== "Cancelled" && book.status !== "Completed" && (
+                              {book.status !== "cancelled" && book.status !== "completed" && (
                                 <button
-                                  onClick={() => handleUpdateBookingStatus(book.id, "Cancelled")}
+                                  onClick={() => handleUpdateBookingStatus(book.id, "cancelled", book.tableId)}
                                   className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-[10px] font-bold border border-red-500/20 rounded-lg transition cursor-pointer"
                                 >
                                   Cancel Seating
@@ -676,23 +831,6 @@ export default function AdminPage() {
                               >
                                 <Edit size={12} />
                               </button>
-
-                              {/* Adjust guests count */}
-                              <div className="flex items-center gap-1 border border-white/10 rounded-lg p-0.5 bg-black/20">
-                                <button 
-                                  onClick={() => handleUpdateGuestCount(book.id, -1)} 
-                                  className="w-5 h-5 flex items-center justify-center text-[10px] hover:text-white cursor-pointer"
-                                >
-                                  -
-                                </button>
-                                <span className="text-[10px] font-mono font-bold w-4 text-center">{book.guests}</span>
-                                <button 
-                                  onClick={() => handleUpdateGuestCount(book.id, 1)} 
-                                  className="w-5 h-5 flex items-center justify-center text-[10px] hover:text-white cursor-pointer"
-                                >
-                                  +
-                                </button>
-                              </div>
                             </div>
                           </div>
                         </div>
@@ -707,24 +845,42 @@ export default function AdminPage() {
                 <div className="bg-white/[0.01] border border-white/5 rounded-3xl p-6 md:p-8 space-y-6 relative overflow-hidden animate-fadeIn">
                   <div className="flex justify-between items-center pb-4 border-b border-white/5">
                     <h4 className="font-serif font-black text-white text-lg">Menu Catalog Inventory</h4>
-                    <span className="text-[9px] uppercase font-mono tracking-widest text-cream/40">Overrides Synced</span>
+                    <span className="text-[9px] uppercase font-mono tracking-widest text-cream/40">Overrides Live Synced</span>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {Object.values(DISH_DATA).flat().map(dish => {
-                      const curStock = stockOverrides[dish.id] || "available";
+                    {Object.entries(DISH_DATA).flatMap(([category, list]) => list.map(d => ({ ...d, category }))).map(dish => {
+                      const matchItem = foodItemsState.find(f => f.id === dish.id);
+                      const curStock = matchItem ? matchItem.stock_status : "available";
+                      const isFomo = matchItem ? matchItem.is_selling_fast : false;
+
                       return (
-                        <div key={dish.id} className="bg-black/20 border border-white/5 p-4 rounded-2xl flex items-center justify-between gap-4">
-                          <div className="flex items-center gap-3">
-                            <img src={dish.image} className="w-12 h-12 object-cover rounded-xl bg-white/5 shrink-0" alt={dish.name} />
-                            <div className="text-left">
-                              <h6 className="font-bold text-white text-xs leading-snug">{dish.name}</h6>
-                              <p className="text-[9px] text-cream/40 mt-1 font-mono">₹{dish.price} &middot; ID: {dish.id}</p>
+                        <div key={dish.id} className="bg-black/20 border border-white/5 p-4 rounded-2xl flex flex-col justify-between gap-4">
+                          <div className="flex items-center justify-between w-full">
+                            <div className="flex items-center gap-3">
+                              <img src={dish.image} className="w-12 h-12 object-cover rounded-xl bg-white/5 shrink-0" alt={dish.name} />
+                              <div className="text-left">
+                                <h6 className="font-bold text-white text-xs leading-snug">{dish.name}</h6>
+                                <p className="text-[9px] text-cream/40 mt-1 font-mono">₹{dish.price} &middot; ID: {dish.id}</p>
+                              </div>
                             </div>
+
+                            {/* Selling Fast tag toggle */}
+                            <button
+                              onClick={() => handleToggleSellingFast(dish.id, dish.name, dish.category, dish.price, isFomo)}
+                              className={`p-2 rounded-lg border transition cursor-pointer flex items-center justify-center ${
+                                isFomo 
+                                  ? "bg-orange-500/10 border-orange-500 text-orange-500" 
+                                  : "bg-white/5 border-white/10 hover:border-white/20 text-cream/40"
+                              }`}
+                              title="Toggle FOMO 'Selling Fast' tag badge"
+                            >
+                              <Flame size={14} className={isFomo ? "animate-pulse" : ""} />
+                            </button>
                           </div>
 
-                          <div className="flex flex-col gap-1 text-right">
-                            <span className="text-[8px] uppercase tracking-wider text-cream/40 font-mono block">Stock Level</span>
+                          <div className="flex justify-between items-center pt-2 border-t border-white/5">
+                            <span className="text-[8px] uppercase tracking-wider text-cream/40 font-mono block">Stock status</span>
                             <div className="flex gap-1 bg-black/40 border border-white/10 p-0.5 rounded-lg shrink-0">
                               {[
                                 { id: "available", label: "✅", title: "Available" },
@@ -733,7 +889,7 @@ export default function AdminPage() {
                               ].map(st => (
                                 <button
                                   key={st.id}
-                                  onClick={() => handleToggleDishStock(dish.id, st.id as any)}
+                                  onClick={() => handleToggleDishStock(dish.id, dish.name, dish.category, dish.price, st.id as any)}
                                   className={`w-6 h-6 flex items-center justify-center text-xs rounded transition cursor-pointer ${
                                     curStock === st.id ? "bg-orange-500 text-black shadow-inner" : "hover:bg-white/5 text-cream"
                                   }`}
@@ -767,9 +923,8 @@ export default function AdminPage() {
                             <tr className="border-b border-white/5 text-cream/40 text-[9px] uppercase tracking-wider font-mono">
                               <th className="py-3 px-2">Position</th>
                               <th className="py-3 px-2">Guest Name</th>
-                              <th className="py-3 px-2">Phone</th>
                               <th className="py-3 px-2">Guests Count</th>
-                              <th className="py-3 px-2">Status</th>
+                              <th className="py-3 px-2">Assign Physical Table</th>
                               <th className="py-3 px-2">Actions</th>
                             </tr>
                           </thead>
@@ -778,39 +933,36 @@ export default function AdminPage() {
                               <tr key={w.id} className="border-b border-white/5 hover:bg-white/[0.01]">
                                 <td className="py-4 px-2 font-mono font-bold text-orange-500">#{w.position}</td>
                                 <td className="py-4 px-2 font-bold text-white">{w.name}</td>
-                                <td className="py-4 px-2 text-cream/70 font-mono">{w.phone}</td>
                                 <td className="py-4 px-2">{w.guests} guests</td>
                                 <td className="py-4 px-2">
-                                  <span className={`px-2 py-0.5 rounded text-[8px] font-bold uppercase ${
-                                    w.status === "ready" ? "bg-green-500/10 text-green-400 border border-green-500/20" :
-                                    w.status === "seated" ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" : "bg-orange-500/10 text-orange-400 border border-orange-500/20"
-                                  }`}>
-                                    {w.status}
-                                  </span>
+                                  <div className="flex gap-2 items-center">
+                                    <select
+                                      value={selectedTableIdForBooking}
+                                      onChange={(e) => setSelectedTableIdForBooking(e.target.value)}
+                                      className="bg-black/40 border border-white/10 rounded-lg px-2.5 py-1 text-xs text-cream focus:outline-none focus:border-orange-500 cursor-pointer"
+                                    >
+                                      <option value="">Choose Seated Table...</option>
+                                      {tables.filter(t => t.status === "available").map(t => (
+                                        <option key={t.id} value={t.id}>
+                                          Table {t.table_number} (Cap: {t.capacity})
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <button
+                                      onClick={() => handleAssignTableToBooking(w.id)}
+                                      className="px-3 py-1 bg-green-500 text-black font-bold rounded-lg text-[10px] uppercase hover:bg-green-400 transition cursor-pointer"
+                                    >
+                                      Seat Guest
+                                    </button>
+                                  </div>
                                 </td>
-                                <td className="py-4 px-2 flex items-center gap-2">
-                                  {w.status === "waiting" && (
-                                    <button
-                                      onClick={() => handlePromoteWaitlist(w.id, "ready")}
-                                      className="px-2.5 py-1 bg-green-500 text-black text-[9px] font-bold rounded cursor-pointer"
-                                    >
-                                      Promote Ready
-                                    </button>
-                                  )}
-                                  {w.status === "ready" && (
-                                    <button
-                                      onClick={() => handlePromoteWaitlist(w.id, "seated")}
-                                      className="px-2.5 py-1 bg-orange-500 text-black text-[9px] font-bold rounded cursor-pointer"
-                                    >
-                                      Mark Seated
-                                    </button>
-                                  )}
+                                <td className="py-4 px-2">
                                   <button
-                                    onClick={() => handleDeleteWaitlist(w.id)}
-                                    className="p-1.5 bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white rounded transition cursor-pointer"
-                                    title="Remove from Waitlist"
+                                    onClick={() => handleUpdateBookingStatus(w.id, "cancelled")}
+                                    className="p-2 bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white rounded-lg transition cursor-pointer"
+                                    title="Cancel reservation entry"
                                   >
-                                    <Trash2 size={10} />
+                                    <Trash2 size={12} />
                                   </button>
                                 </td>
                               </tr>

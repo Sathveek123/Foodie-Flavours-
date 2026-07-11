@@ -1,23 +1,22 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { motion } from "motion/react";
-import { LogIn, Mail, Lock, ArrowLeft, AlertCircle } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
+import { LogIn, Mail, ArrowLeft, AlertCircle, KeyRound, Check } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
-
-import { useEffect } from "react";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [otpToken, setOtpToken] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  
   const [errorMsg, setErrorMsg] = useState("");
   const [loading, setLoading] = useState(false);
-  const [failedAttempts, setFailedAttempts] = useState(0);
   const [cooldown, setCooldown] = useState(0);
-  
-  const { login, forgotPassword } = useAuth();
+
+  const { login, verifyOtp } = useAuth();
   const navigate = useNavigate();
 
-  // Cooldown countdown timer for rate limiting
+  // Cooldown countdown timer for rate limiting resends
   useEffect(() => {
     if (cooldown > 0) {
       const timer = setInterval(() => {
@@ -27,46 +26,40 @@ export default function LoginPage() {
     }
   }, [cooldown]);
 
-  const handleLogin = async (e: React.FormEvent) => {
+  // Step 1: Send OTP to Email
+  const handleRequestOtp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (cooldown > 0) return;
-    if (!email.trim() || !password) return;
+    if (!email.trim() || cooldown > 0) return;
 
     setLoading(true);
     setErrorMsg("");
 
-    const { error } = await login(email.trim(), password);
+    const { error } = await login(email.trim());
     setLoading(false);
 
     if (error) {
       setErrorMsg(error.message);
-      setFailedAttempts((prev) => {
-        const next = prev + 1;
-        if (next >= 5) {
-          setCooldown(30);
-          return 0; // Reset count
-        }
-        return next;
-      });
     } else {
-      setFailedAttempts(0);
-      navigate("/app");
+      setOtpSent(true);
+      setCooldown(30); // 30 seconds wait before allowed resend
     }
   };
 
-  const handleForgotPassword = async () => {
-    if (!email.trim()) {
-      setErrorMsg("Please enter your email address to request a reset link.");
-      return;
-    }
+  // Step 2: Verify Code and log in
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim() || !otpToken.trim()) return;
+
     setLoading(true);
     setErrorMsg("");
-    const { error } = await forgotPassword(email.trim());
+
+    const { error } = await verifyOtp(email.trim(), otpToken.trim());
     setLoading(false);
+
     if (error) {
-      setErrorMsg(error.message);
+      setErrorMsg(error.message || "Invalid or expired verification code.");
     } else {
-      setErrorMsg("Password reset link sent to your email! (Or mock reset confirmed)");
+      navigate("/app");
     }
   };
 
@@ -111,7 +104,7 @@ export default function LoginPage() {
             Welcome Back
           </h2>
           <p className="text-cream/50 text-xs tracking-wider uppercase font-mono">
-            Log in to Flavora Kitchen
+            {otpSent ? "Verify Security Code" : "Log In via Email OTP"}
           </p>
         </div>
 
@@ -119,79 +112,117 @@ export default function LoginPage() {
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2"
+            className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2 text-left"
           >
             <AlertCircle size={16} className="shrink-0" />
             <span>{errorMsg}</span>
           </motion.div>
         )}
 
-        <form onSubmit={handleLogin} className="space-y-6">
-          <div className="space-y-4">
-            {/* Email Field */}
-            <div className="relative">
-              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-cream/25">
-                <Mail size={16} />
-              </span>
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="Email Address"
-                className="w-full bg-white/5 border border-white/10 rounded-xl pl-12 pr-4 py-3.5 text-sm focus:outline-none focus:border-orange-500 transition text-white placeholder-cream/25"
-              />
-            </div>
+        <AnimatePresence mode="wait">
+          {!otpSent ? (
+            /* STEP 1: Enter Email form */
+            <motion.form
+              key="email-form"
+              initial={{ opacity: 0, x: -10 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 10 }}
+              onSubmit={handleRequestOtp}
+              className="space-y-6"
+            >
+              <div className="space-y-4">
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-cream/25">
+                    <Mail size={16} />
+                  </span>
+                  <input
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="Email Address"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl pl-12 pr-4 py-3.5 text-sm focus:outline-none focus:border-orange-500 transition text-white placeholder-cream/25"
+                  />
+                </div>
+              </div>
 
-            {/* Password Field */}
-            <div className="relative">
-              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-cream/25">
-                <Lock size={16} />
-              </span>
-              <input
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Password"
-                className="w-full bg-white/5 border border-white/10 rounded-xl pl-12 pr-4 py-3.5 text-sm focus:outline-none focus:border-orange-500 transition text-white placeholder-cream/25"
-              />
-            </div>
-            
-            <div className="flex justify-end mt-1">
               <button
-                type="button"
-                onClick={handleForgotPassword}
-                className="text-[11px] text-orange-500/80 hover:text-orange-500 font-bold hover:underline cursor-pointer"
+                type="submit"
+                disabled={loading}
+                className="w-full py-4 bg-orange-500 text-white font-bold rounded-xl shadow-lg shadow-orange-500/10 hover:bg-orange-400 transition flex items-center justify-center gap-2 cursor-pointer text-sm font-sans"
               >
-                Forgot Password?
+                {loading ? (
+                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <>
+                    <LogIn size={15} /> Send OTP code
+                  </>
+                )}
               </button>
-            </div>
-          </div>
+            </motion.form>
+          ) : (
+            /* STEP 2: Verify Code form */
+            <motion.form
+              key="otp-form"
+              initial={{ opacity: 0, x: 10 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -10 }}
+              onSubmit={handleVerifyOtp}
+              className="space-y-6"
+            >
+              <p className="text-xs text-cream/65 text-center leading-relaxed">
+                Verification code dispatched to <span className="text-orange-400 font-bold">{email}</span>.
+              </p>
 
-          <button
-            type="submit"
-            disabled={loading || cooldown > 0}
-            className={`w-full py-4 font-bold rounded-xl shadow-lg transition flex items-center justify-center gap-2 cursor-pointer text-sm font-sans ${
-              cooldown > 0 
-                ? "bg-red-500/20 text-red-400 border border-red-500/30 cursor-not-allowed" 
-                : "bg-orange-500 text-white shadow-orange-500/10 hover:bg-orange-400"
-            }`}
-          >
-            {loading ? (
-              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-            ) : cooldown > 0 ? (
-              <span>Locked: Try in {cooldown}s</span>
-            ) : (
-              <>
-                <LogIn size={15} /> Log In
-              </>
-            )}
-          </button>
-        </form>
+              <div className="space-y-4">
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-cream/25">
+                    <KeyRound size={16} />
+                  </span>
+                  <input
+                    type="text"
+                    required
+                    maxLength={6}
+                    value={otpToken}
+                    onChange={(e) => setOtpToken(e.target.value)}
+                    placeholder="Enter 6-digit Code"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl pl-12 pr-4 py-3.5 text-sm focus:outline-none focus:border-orange-500 transition text-white placeholder-cream/25 tracking-widest text-center font-mono font-bold"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3">
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-4 bg-orange-500 text-white font-bold rounded-xl shadow-lg shadow-orange-500/10 hover:bg-orange-400 transition flex items-center justify-center gap-2 cursor-pointer text-sm font-sans"
+                >
+                  {loading ? (
+                    <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <>
+                      <Check size={15} /> Confirm &amp; Log In
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleRequestOtp}
+                  disabled={cooldown > 0 || loading}
+                  className={`w-full py-3 bg-white/5 border border-white/5 text-xs text-cream hover:bg-white/10 rounded-xl transition cursor-pointer ${
+                    cooldown > 0 ? "opacity-50 cursor-not-allowed text-cream/30" : ""
+                  }`}
+                >
+                  {cooldown > 0 ? `Resend Code in ${cooldown}s` : "Resend Verification Code"}
+                </button>
+              </div>
+            </motion.form>
+          )}
+        </AnimatePresence>
 
         <div className="mt-8 pt-6 border-t border-white/5 text-center text-xs text-cream/50">
-          Don't have an account?{" "}
+          Don't have an account yet?{" "}
           <Link to="/signup" className="text-orange-500 font-bold hover:underline">
             Sign Up
           </Link>
